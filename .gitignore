@@ -1,0 +1,18 @@
+
+# Node
+frontend/node_modules
+frontend/.next
+frontend/.env.local
+
+# Python
+backend/.venv
+backend/__pycache__/
+*.pyc
+backend/.env
+
+# General
+.DS_Store
+.env
+.vscode
+npm-debug.log
+EOF
