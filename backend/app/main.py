@@ -3,20 +3,11 @@ from pydantic import BaseModel
 import sqlite3 
 from fastapi.middleware.cors import CORSMiddleware
 import random
-from passlib.context import CryptContext
+from datetime import datetime
 
 app = FastAPI()
 
-# --- Security Setup (Hashing) ---
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
-
-def get_password_hash(password):
-    return pwd_context.hash(password)
-# ---------------------------------
-
+# --- Middleware ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  
@@ -25,25 +16,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# SQLite Connection - Ensure this path is correct relative to your execution
-# NOTE: Using a path relative to the current file execution
+# --- Database Connection ---
 conn = sqlite3.connect("../database/database.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# --- Pydantic Models ---
-
-class UserCreate(BaseModel): # For registration
+# --- Models ---
+class UserCreate(BaseModel):
     name: str
     email: str
     password: str
 
-class UserLogin(BaseModel): # For login
+class UserLogin(BaseModel):
     email: str
     password: str
-
-class User(BaseModel): # Existing model for general submission (used in old /api/add_user)
-    name: str
-    email: str
 
 class Organiser(BaseModel):
     name: str
@@ -52,11 +37,12 @@ class Organiser(BaseModel):
     prize_money: int
     event_time: str
 
-class JoinEvent(BaseModel): # Updated to include user email
+class JoinEvent(BaseModel):
     user_email: str
     event_id: int 
 
-# --- New/Updated Auth Endpoints ---
+
+# --- AUTH ENDPOINTS ---
 
 @app.post("/api/signup")
 def signup(user: UserCreate):
@@ -65,14 +51,11 @@ def signup(user: UserCreate):
     if cursor.fetchone():
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    # Hash the password
-    
-
-    # Store user in DB
     try:
-        # Note: 'password' column stores the hashed value
-        cursor.execute("INSERT INTO users (name, email, password) VALUES (?, ?, ?)", 
-                       (user.name, user.email, user.password))
+        cursor.execute(
+            "INSERT INTO users (name, email, password) VALUES (?, ?, ?)", 
+            (user.name, user.email, user.password)
+        )
         conn.commit()
         return {"message": f"User {user.name} registered successfully!"}
     except Exception as e:
@@ -82,29 +65,21 @@ def signup(user: UserCreate):
 
 @app.post("/api/login")
 def login(form_data: UserLogin):
-    # Fetch user from DB
     cursor.execute("SELECT name, email, password FROM users WHERE email = ?", (form_data.email,))
     db_user = cursor.fetchone()
 
     if not db_user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
 
-    user_name, user_email, password = db_user
-    if(form_data.password==password):
-        return {"message":"incorrect Password"}
-    # Verify password
-    
-    # Success: Return user data. The client will store the email as the session key.
+    user_name, user_email, db_password = db_user
+
+    if form_data.password != db_password:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect password")
+
     return {"message": "Login successful", "email": user_email, "name": user_name}
 
-# --- Standard App Endpoints (Secured by passing email) ---
 
-@app.post("/api/add_user")
-def add_user(user: User):
-    # This endpoint is probably outdated by /api/signup, but kept for compatibility
-    cursor.execute("INSERT INTO users (name, email) VALUES (?, ?)", (user.name, user.email))
-    conn.commit()
-    return {"message": f"User {user.name} added successfully!"}
+# --- EVENTS ENDPOINTS ---
 
 @app.get("/getevents")
 def fetch_events():
@@ -114,75 +89,10 @@ def fetch_events():
     events = [dict(zip(columns, row)) for row in rows]
     return {"events": events}
 
-@app.post("/api/join_event")
-def join_event(join_data: JoinEvent):
-    user_email = join_data.user_email
-    event_id = join_data.event_id
-
-    # Check if the user exists
-    cursor.execute("SELECT name FROM users WHERE email = ?", (user_email,))
-    user_row = cursor.fetchone()
-    if not user_row:
-        raise HTTPException(status_code=404, detail="User not found.")
-    
-    user_name = user_row[0]
-
-    # Check if the user is already a participant in this event
-    cursor.execute(
-        "SELECT ticket_number FROM participants WHERE email = ? AND event_id = ?",
-        (user_email, event_id)
-    )
-    existing_participant = cursor.fetchone()
-
-    if existing_participant:
-        return {"message": "You have already joined this event!", "ticket_number": existing_participant[0]}
-
-    # Generate a simple ticket number
-    ticket_number = random.randint(100000, 999999)
-    
-    try:
-        cursor.execute(
-            """
-            INSERT INTO participants (event_id, name, email, ticket_number)
-            VALUES (?, ?, ?, ?)
-            """,
-            (event_id, user_name, user_email, ticket_number)
-        )
-        conn.commit()
-        return {"message": "Successfully joined the event!", "ticket_number": ticket_number}
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Database error: {e}")
-
-# This endpoint is secured by relying on the client passing the correct email
-@app.get("/api/my_events/{user_email}")
-def fetch_my_events(user_email: str):
-    # Select joined events and their details, including ticket number
-    cursor.execute(
-        """
-        SELECT 
-            p.ticket_number, 
-            e.name as event_name, 
-            e.event_time, 
-            e.prize
-        FROM 
-            participants p
-        JOIN 
-            events e ON p.event_id = e.id
-        WHERE 
-            p.email = ?
-        """,
-        (user_email,)
-    )
-    rows = cursor.fetchall()
-    columns = [description[0] for description in cursor.description]
-    joined_events = [dict(zip(columns, row)) for row in rows]
-    return {"joined_events": joined_events}
 
 @app.post("/api/add_organiser")
 def add_organiser(org: Organiser):
     try:
-        # Insert into organisers table
         cursor.execute(
             """
             INSERT INTO organisers (name, email, event_name, prize_money, event_time)
@@ -191,7 +101,6 @@ def add_organiser(org: Organiser):
             (org.name, org.email, org.event_name, org.prize_money, org.event_time)
         )
 
-        # Insert into events table
         cursor.execute(
             """
             INSERT INTO events (name, event_time, prize)
@@ -206,3 +115,182 @@ def add_organiser(org: Organiser):
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- PARTICIPATION LOGIC ---
+
+@app.post("/api/join_event")
+def join_event(join_data: JoinEvent):
+    user_email = join_data.user_email
+    event_id = join_data.event_id
+
+    # Check if user exists
+    cursor.execute("SELECT name FROM users WHERE email = ?", (user_email,))
+    user_row = cursor.fetchone()
+    if not user_row:
+        raise HTTPException(status_code=404, detail="User not found.")
+    
+    user_name = user_row[0]
+
+    # Check if already joined
+    cursor.execute(
+        "SELECT ticket_number FROM participants WHERE email = ? AND event_id = ?",
+        (user_email, event_id)
+    )
+    existing_participant = cursor.fetchone()
+    if existing_participant:
+        return {"message": "You have already joined this event!", "ticket_number": existing_participant[0]}
+
+    # Get the next ticket number for this event
+    cursor.execute(
+        "SELECT MAX(ticket_number) FROM participants WHERE event_id = ?",
+        (event_id,)
+    )
+    max_ticket = cursor.fetchone()[0]
+    if max_ticket is None:
+        ticket_number = 1
+    else:
+        ticket_number = max_ticket + 1
+
+    # Insert participation
+    try:
+        cursor.execute(
+            """
+            INSERT INTO participants (event_id, name, email, ticket_number)
+            VALUES (?, ?, ?, ?)
+            """,
+            (event_id, user_name, user_email, ticket_number)
+        )
+        conn.commit()
+        return {"message": "Successfully joined the event!", "ticket_number": ticket_number}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
+
+# --- FETCH USER'S JOINED EVENTS (for frontend 'Joined Events' section) ---
+@app.get("/joined")
+def get_joined_events(email: str):
+    try:
+        cursor.execute("""
+            SELECT 
+                e.id AS id,
+                e.name AS name,
+                e.event_time AS event_time,
+                e.prize AS prize,
+                p.ticket_number AS ticket_number
+            FROM participants p
+            JOIN events e ON p.event_id = e.id
+            WHERE p.email = ?
+        """, (email,))
+        
+        rows = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description]
+        joined_events = [dict(zip(columns, row)) for row in rows]
+        print(joined_events)
+        
+
+        return {"joined_events": joined_events}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching joined events: {e}")
+
+
+from fastapi import APIRouter
+
+@app.delete("/api/remove_past_events")
+def remove_past_events():
+    try:
+        now = datetime.now()
+        
+        # Fetch past events
+        cursor.execute("SELECT id, event_time FROM events")
+        events = cursor.fetchall()
+
+        past_event_ids = []
+        for e in events:
+            event_id, event_time_str = e
+            try:
+                event_time = datetime.fromisoformat(event_time_str)
+            except:
+                event_time = datetime.strptime(event_time_str, "%Y-%m-%d %H:%M:%S")
+            
+            if event_time <= now:
+                past_event_ids.append(event_id)
+
+        if not past_event_ids:
+            return {"message": "No past events to remove."}
+
+        # Remove from winners, participants, and events
+        for event_id in past_event_ids:
+            cursor.execute("DELETE FROM winners WHERE event_id = ?", (event_id,))
+            cursor.execute("DELETE FROM participants WHERE event_id = ?", (event_id,))
+            cursor.execute("DELETE FROM events WHERE id = ?", (event_id,))
+
+        conn.commit()
+        return {"message": f"Removed {len(past_event_ids)} past events successfully.", "removed_event_ids": past_event_ids}
+
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
+
+
+@app.post("/api/finalize_events")
+def finalize_events():
+    try:
+        now = datetime.now()
+        # Get all past events
+        cursor.execute("SELECT id FROM events")
+        events = cursor.fetchall()
+        past_event_ids = []
+
+        for e in events:
+            event_id = e[0]
+            cursor.execute("SELECT event_time FROM events WHERE id = ?", (event_id,))
+            event_time_str = cursor.fetchone()[0]
+            try:
+                event_time = datetime.fromisoformat(event_time_str)
+            except:
+                event_time = datetime.strptime(event_time_str, "%Y-%m-%d %H:%M:%S")
+            
+            if event_time <= now:
+                past_event_ids.append(event_id)
+
+        if not past_event_ids:
+            return {"message": "No events to finalize."}
+
+        winners_info = []
+
+        for event_id in past_event_ids:
+            # Get all participants
+            cursor.execute("SELECT name, email, ticket_number FROM participants WHERE event_id = ?", (event_id,))
+            participants = cursor.fetchall()
+
+            if participants:
+                winner = random.choice(participants)
+                winner_name, winner_email, winner_ticket = winner
+
+                # Save winner to winners table
+                cursor.execute(
+                    "INSERT INTO winners (event_id, winner_name, winner_email, ticket_number) VALUES (?, ?, ?, ?)",
+                    (event_id, winner_name, winner_email, winner_ticket)
+                )
+                winners_info.append({
+                    "event_id": event_id,
+                    "winner_name": winner_name,
+                    "winner_email": winner_email,
+                    "ticket_number": winner_ticket
+                })
+
+            # Delete participants
+            cursor.execute("DELETE FROM participants WHERE event_id = ?", (event_id,))
+            # Delete event
+            cursor.execute("DELETE FROM events WHERE id = ?", (event_id,))
+
+        conn.commit()
+        return {"message": "Finalized past events successfully.", "winners": winners_info}
+
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
