@@ -71,6 +71,11 @@ export default function HomePage() {
             Organise Lottery
           </button>
         </Link>
+        <Link href="/signup">
+          <button className="px-6 py-3 bg-[#042A2B] text-[#F4E04D] rounded-2xl text-lg font-semibold hover:scale-105 transition-transform duration-200 shadow-md">
+            Signup/Login
+          </button>
+        </Link>
       </div>
 
       {/* Event List */}
